@@ -5,6 +5,12 @@
  *      Author: Tai Kjendal
  */
 
+/* XDCtools Header files */
+#include <xdc/cfg/global.h>
+
+/* BIOS Header files */
+#include <ti/sysbios/BIOS.h>
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <math.h>
@@ -28,6 +34,10 @@ volatile uint32_t gADCErrors = 0;                           // number of missed 
 volatile uint16_t samples[ADC_TRIGGER_SIZE];
 volatile bool trigState = true; // 2 trigger states
 
+volatile uint32_t trigger;
+float fScale;
+volatile int vState = 4;     // 5 voltage scale states
+
 // Initialize ADC handling hardware
 void ADC_Init(void) {
     SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC1);
@@ -46,8 +56,6 @@ void ADC_Init(void) {
                                                                 // enable interrupt, and make it the end of sequence
     ADCIntEnable(ADC1_BASE, 0);         // enable sequence 0 interrupt in the ADC1 peripheral
     ADCSequenceEnable(ADC1_BASE, 0);    // enable the sequence.  it is now sampling
-//    IntPrioritySet(INT_ADC1SS0, 0);     // set ADC1 sequence 0 interrupt priority
-//    IntEnable(INT_ADC1SS0);             // enable ADC1 sequence 0 interrupt in int. controller
 }
 
 int RisingTrigger(void) {   // search for edge
@@ -58,7 +66,7 @@ int RisingTrigger(void) {   // search for edge
     // Step 2
     switch(trigState) {
     case 0: // positive edge trigger
-        for (index; index > iStop; index--) {
+        for (; index > iStop; index--) {
             if (    gADCBuffer[ADC_BUFFER_WRAP(index)] <= ADC_OFFSET &&
                     gADCBuffer[ADC_BUFFER_WRAP(index+1)] > ADC_OFFSET)
                 break;
@@ -67,7 +75,7 @@ int RisingTrigger(void) {   // search for edge
 
     case 1: // falling edge trigger
         iStop = index + ADC_BUFFER_SIZE/2;
-        for (index; index < iStop; index++) {
+        for (; index < iStop; index++) {
             if (    gADCBuffer[ADC_BUFFER_WRAP(index)] >= ADC_OFFSET &&
                     gADCBuffer[ADC_BUFFER_WRAP(index+1)] < ADC_OFFSET)
                 break;
@@ -124,4 +132,40 @@ void ADC_ISR(void) {
     gADCBuffer[
                gADCBufferIndex = ADC_BUFFER_WRAP(gADCBufferIndex + 1)
                ] = ADC1_SSFIFO0_R;      // read sample from the ADC1 sequence 0 FIFO [datasheet pg 1111]
+}
+
+
+// Task for creating a waveform, priority 10
+void waveformTask_func(UArg arg1, UArg arg2) {
+    IntMasterEnable();
+
+    while (true) {
+        Semaphore_pend(semWaveform, BIOS_WAIT_FOREVER);
+
+        Semaphore_pend(semCritical, BIOS_WAIT_FOREVER);
+        trigger = RisingTrigger(); // search for trigger
+        Semaphore_post(semCritical);
+
+        Semaphore_post(semProcessing);
+    }
+}
+
+// Task for processing stuff, priority 2
+void processingTask_func(UArg arg1, UArg arg2) {
+    float fVoltsPerDiv[] = {0.1, 0.2, 0.5, 1, 2}; // voltage scale/div values
+    int i;
+
+    while (true) {
+        Semaphore_pend(semProcessing, BIOS_WAIT_FOREVER);
+
+        fScale = (VIN_RANGE * PIXELS_PER_DIV)/((1 << ADC_BITS) * fVoltsPerDiv[vState]);
+
+        Semaphore_pend(semCritical, BIOS_WAIT_FOREVER);
+        for (i = 0; i < ADC_TRIGGER_SIZE-1; i++) // read gADCBuffer measurements into samples[]
+            samples[i] = gADCBuffer[ADC_BUFFER_WRAP(trigger - LCD_HORIZONTAL_MAX/2) + i];
+        Semaphore_post(semCritical);
+
+        Semaphore_post(semWaveform);
+        Semaphore_post(semDisplay);
+    }
 }

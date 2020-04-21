@@ -27,6 +27,9 @@ extern volatile uint32_t gADCErrors;                    // number of missed ADC 
 extern volatile uint16_t samples[ADC_TRIGGER_SIZE]; // sample to show on LCD screen
 extern volatile bool trigState; // 2 trigger states
 
+extern float fScale;
+extern volatile int vState;
+
 // Initialize ADC handling hardware
 void ADC_Init(void);
 int RisingTrigger(void);

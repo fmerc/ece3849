@@ -6,9 +6,15 @@
  *
  * ECE 3849 Lab button handling
  */
+
+/* XDCtools Header files */
+#include <xdc/cfg/global.h>
+
+/* BIOS Header files */
+#include <ti/sysbios/BIOS.h>
+
 #include <stdint.h>
 #include <stdbool.h>
-#include <math.h>
 #include "inc/hw_memmap.h"
 #include "inc/hw_ints.h"
 #include "driverlib/sysctl.h"
@@ -18,6 +24,7 @@
 #include "driverlib/adc.h"
 #include "sysctl_pll.h"
 #include "buttons.h"
+#include "sampling.h"
 
 // public globals
 volatile uint32_t gButtons = 0; // debounced button state, one per bit in the lowest bits
@@ -37,17 +44,9 @@ extern volatile uint32_t gTime; // time in hundredths of a second
 // initialize all button and joystick handling hardware
 void ButtonInit(void)
 {
-    // initialize a general purpose timer for periodic interrupts
-    SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER0);
-    TimerDisable(TIMER0_BASE, TIMER_BOTH);
-    TimerConfigure(TIMER0_BASE, TIMER_CFG_PERIODIC);
-    TimerLoadSet(TIMER0_BASE, TIMER_A, roundf((float)gSystemClock / BUTTON_SCAN_RATE) - 1);
-    TimerIntEnable(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
-    TimerEnable(TIMER0_BASE, TIMER_BOTH);
-
     // initialize interrupt controller to respond to timer interrupts
-    IntPrioritySet(INT_TIMER0A, BUTTON_INT_PRIORITY);
-    IntEnable(INT_TIMER0A);
+//    IntPrioritySet(INT_TIMER0A, BUTTON_INT_PRIORITY);
+//    IntEnable(INT_TIMER0A);
 
     // GPIO PJ0 and PJ1 = EK-TM4C1294XL buttons 1 and 2
     SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOJ);
@@ -159,37 +158,11 @@ uint32_t ButtonAutoRepeat(void)
     return presses;
 }
 
-// put data into the FIFO, skip if full
-// returns 1 on success, 0 if FIFO was full
-int fifo_put(DataType data)
-{
-    int new_tail = fifo_tail + 1;
-    if (new_tail >= FIFO_SIZE) new_tail = 0; // wrap around
-    if (fifo_head != new_tail) {    // if the FIFO is not full
-        fifo[fifo_tail] = data;     // store data into the FIFO
-        fifo_tail = new_tail;       // advance FIFO tail index
-        return 1;                   // success
-    }
-    return 0;   // full
-}
-
-// get data from the FIFO
-// returns 1 on success, 0 if FIFO was empty
-int fifo_get(DataType *data)
-{
-    if (fifo_head != fifo_tail) {   // if the FIFO is not empty
-        *data = fifo[fifo_head];    // read data from the FIFO
-        fifo_head++;                // advance FIFO head index
-        if (fifo_head >= FIFO_SIZE) fifo_head = 0; // wrap around
-        return 1;                   // success
-    }
-    return 0;   // empty
-}
-
 // ISR for scanning and debouncing buttons
 void ButtonISR(void) {
     TimerIntClear(TIMER0_BASE, TIMER_TIMA_TIMEOUT); // clear interrupt flag
 
+/*
     // read hardware button state
     uint32_t gpio_buttons =
             (~GPIOPinRead(GPIO_PORTJ_BASE, 0xff) & (GPIO_PIN_1 | GPIO_PIN_0)) | // EK-TM4C1294XL buttons in positions 0 and 1
@@ -216,6 +189,70 @@ void ButtonISR(void) {
         fifo_put('i');  // increment voltage
     if (presses & 8)    // booster2
         fifo_put('j');  // decrement voltage
+*/
+}
 
 
+void clock_func(UArg arg) {
+    Semaphore_post(semButtons);
+}
+
+// Task for reading buttons, priority 8
+void buttonTask_func(UArg arg1, UArg arg2) {
+    while (true) {
+        Semaphore_pend(semButtons, BIOS_WAIT_FOREVER);
+
+        // read hardware button state
+        uint32_t gpio_buttons =
+                (~GPIOPinRead(GPIO_PORTJ_BASE, 0xff) & (GPIO_PIN_1 | GPIO_PIN_0)) | // EK-TM4C1294XL buttons in positions 0 and 1
+                ((~GPIOPinRead(GPIO_PORTH_BASE, 0xff) & GPIO_PIN_1) << 1) |         // S1
+                ((~GPIOPinRead(GPIO_PORTK_BASE, 0xff) & GPIO_PIN_6) >> 3) |         // S2
+                (~GPIOPinRead(GPIO_PORTD_BASE, 0xff) & GPIO_PIN_4);                 // SEL
+
+        uint32_t old_buttons = gButtons;    // save previous button state
+        ButtonDebounce(gpio_buttons);       // Run the button debouncer. The result is in gButtons.
+        ButtonReadJoystick();               // Convert joystick state to button presses. The result is in gButtons.
+        uint32_t presses = ~old_buttons & gButtons;   // detect button presses (transitions from not pressed to pressed)
+        presses |= ButtonAutoRepeat();      // autorepeat presses if a button is held long enough
+        char button;
+
+        if (presses & 2) {  // usr2
+            button = 't';   // trigger change
+            Mailbox_post(mailbox0, &button, M0_TIMEOUT);
+        }
+
+        if (presses & 4) {  // booster1
+            button = 'i';   // increment voltage
+            Mailbox_post(mailbox0, &button, M0_TIMEOUT);
+        }
+
+        if (presses & 8) {  // booster2
+            button = 'j';   // decrement voltage
+            Mailbox_post(mailbox0, &button, M0_TIMEOUT);
+        }
+    }
+}
+
+// Task for user input, priority 6
+void userInputTask_func(UArg arg1, UArg arg2) {
+    char buttons[10];   // button presses
+    while (true) {
+        if (Mailbox_pend(mailbox0, &buttons, M0_TIMEOUT)) {
+            int i;
+
+            Semaphore_pend(semCritical, BIOS_WAIT_FOREVER);
+            for (i = 0; i < 10; i++) {
+                if (buttons[i]==('i') && gButtons == 4) { // increment voltage
+                    vState = (++vState) % 5;
+                } else if (buttons[i]==('j') && gButtons == 8) { // decrement voltage
+                    vState = (vState <= 0) ? 4 : vState - 1;
+                } else if (buttons[i]==('t') && gButtons == 2) { // change trigger
+                    trigState = !trigState;
+                }
+            }
+            Semaphore_post(semCritical);
+        }
+
+        Semaphore_post(semDisplay);
+    }
 }

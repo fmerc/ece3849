@@ -40,6 +40,7 @@ extern uint32_t gJoystick[2];       // joystick coordinates
 extern uint32_t gADCSamplingRate;   // [Hz] actual ADC sampling rate
 
 #define FIFO_SIZE 11        // FIFO capacity is 1 item fewer
+#define M0_TIMEOUT 10       // Mailbox pend/post timeout
 typedef char DataType;      // FIFO data type
 
 // initialize all button and joystick handling hardware
