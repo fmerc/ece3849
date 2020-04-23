@@ -10,6 +10,7 @@
 
 /* BIOS Header files */
 #include <ti/sysbios/BIOS.h>
+#include <ti/sysbios/knl/Task.h>
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -28,13 +29,24 @@
 #include "buttons.h"
 #include "sampling.h"
 
+// KISS FFT
+#include "kiss_fft.h"
+#include "_kiss_fft_guts.h"
+#define PI 3.14159265358979f
+#define NFFT 1024         // FFT length
+#define KISS_FFT_CFG_SIZE (sizeof(struct kiss_fft_state)+sizeof(kiss_fft_cpx)*(NFFT-1))
+volatile bool spectrumMode = false;
+
+// ADC Sampling
 volatile int32_t gADCBufferIndex = ADC_BUFFER_SIZE - 1;     // latest sample index
 volatile uint16_t gADCBuffer[ADC_BUFFER_SIZE];              // circular buffer
 volatile uint32_t gADCErrors = 0;                           // number of missed ADC deadlines
+volatile uint16_t fft_samples[NFFT];
 volatile uint16_t samples[ADC_TRIGGER_SIZE];
 volatile bool trigState = true; // 2 trigger states
 
 volatile uint32_t trigger;
+float fVoltsPerDiv[] = {0.1, 0.2, 0.5, 1, 2}; // voltage scale/div values
 float fScale;
 volatile int vState = 4;     // 5 voltage scale states
 
@@ -142,9 +154,20 @@ void waveformTask_func(UArg arg1, UArg arg2) {
     while (true) {
         Semaphore_pend(semWaveform, BIOS_WAIT_FOREVER);
 
-        Semaphore_pend(semCritical, BIOS_WAIT_FOREVER);
-        trigger = RisingTrigger(); // search for trigger
-        Semaphore_post(semCritical);
+        if (spectrumMode) {
+            int i;
+
+            Semaphore_pend(semCritical, BIOS_WAIT_FOREVER);
+            for (i = 0; i < NFFT; i++) {
+                fft_samples[i] = gADCBuffer[ADC_BUFFER_WRAP(gADCBufferIndex - NFFT + i)];
+            }
+            Semaphore_post(semCritical);
+
+        } else {
+            Semaphore_pend(semCritical, BIOS_WAIT_FOREVER);
+            trigger = RisingTrigger(); // search for trigger
+            Semaphore_post(semCritical);
+        }
 
         Semaphore_post(semProcessing);
     }
@@ -152,18 +175,51 @@ void waveformTask_func(UArg arg1, UArg arg2) {
 
 // Task for processing stuff, priority 2
 void processingTask_func(UArg arg1, UArg arg2) {
-    float fVoltsPerDiv[] = {0.1, 0.2, 0.5, 1, 2}; // voltage scale/div values
+    static char kiss_fft_cfg_buffer[KISS_FFT_CFG_SIZE]; // Kiss FFT config memory
+    size_t buffer_size = KISS_FFT_CFG_SIZE;
+    kiss_fft_cfg cfg;                        // Kiss FFT config
+    static kiss_fft_cpx in[NFFT], out[NFFT]; // complex waveform and spectrum buffers
     int i;
+    cfg = kiss_fft_alloc(NFFT, 0, kiss_fft_cfg_buffer, &buffer_size); // init Kiss FFT
+
+//    static float w[NFFT]; // window function
+//    for (i = 0; i < NFFT; i++) {
+//        // Blackman window
+//        w[i] = 0.42f - 0.5f * cosf(2*PI*i/(NFFT-1)) + 0.08f * cosf(4*PI*i/(NFFT-1));
+//    }
 
     while (true) {
         Semaphore_pend(semProcessing, BIOS_WAIT_FOREVER);
 
-        fScale = (VIN_RANGE * PIXELS_PER_DIV)/((1 << ADC_BITS) * fVoltsPerDiv[vState]);
+        if (spectrumMode) {
 
-        Semaphore_pend(semCritical, BIOS_WAIT_FOREVER);
-        for (i = 0; i < ADC_TRIGGER_SIZE-1; i++) // read gADCBuffer measurements into samples[]
-            samples[i] = gADCBuffer[ADC_BUFFER_WRAP(trigger - LCD_HORIZONTAL_MAX/2) + i];
-        Semaphore_post(semCritical);
+            Semaphore_pend(semCritical, BIOS_WAIT_FOREVER);
+            for (i = 0; i < NFFT; i++) {        // generate an input waveform
+                in[i].r = sinf(20*PI*i/NFFT);   // real part of waveform
+//                in[i].r = ((float)fft_samples[i] - trigger); // real part of waveform
+                in[i].i = 0;                    // imaginary part of waveform
+            }
+            Semaphore_post(semCritical);
+
+            kiss_fft(cfg, in, out);         // compute FFT
+
+            // convert first 128 bins of out[] to dB for display
+            Semaphore_pend(semCritical, BIOS_WAIT_FOREVER);
+            for (i = 0; i < ADC_TRIGGER_SIZE-1; i++) {
+                samples[i] = 128 - 10 * log10f(out[i].r * out[i].r + out[i].i * out[i].i);
+            }
+            Semaphore_post(semCritical);
+        }
+
+        else {
+            fScale = (VIN_RANGE * PIXELS_PER_DIV)/((1 << ADC_BITS) * fVoltsPerDiv[vState]);
+
+            Semaphore_pend(semCritical, BIOS_WAIT_FOREVER);
+            for (i = 0; i < ADC_TRIGGER_SIZE-1; i++) {// read gADCBuffer measurements into samples[]
+                samples[i] = gADCBuffer[ADC_BUFFER_WRAP(trigger - LCD_HORIZONTAL_MAX/2) + i];
+            }
+            Semaphore_post(semCritical);
+        }
 
         Semaphore_post(semWaveform);
         Semaphore_post(semDisplay);

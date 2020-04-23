@@ -27,6 +27,7 @@
 #include "buttons.h"
 
 uint32_t gSystemClock = 120000000; // [Hz] system clock frequency
+extern volatile bool spectrumMode;
 
 // Voltage/time scale constants
 const char * const gVoltageScaleStr[] = {"100 mV", "200 mV", "500 mV", " 1 V", " 2 V"};
@@ -45,9 +46,6 @@ tContext sContext;
 int main(void)
 {
     IntMasterDisable();
-
-    // Initialize the system clock to 120 MHz
-//    gSystemClock = SysCtlClockFreqSet(SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN | SYSCTL_USE_PLL | SYSCTL_CFG_VCO_480, 120000000);
 
     // CPU measurement
     SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER3);
@@ -108,29 +106,28 @@ void displayTask_func(UArg arg1, UArg arg2) {
 
         Semaphore_pend(semCritical, BIOS_WAIT_FOREVER);
         y = LCD_VERTICAL_MAX/2 - (int)roundf(fScale * ((int)(samples[0] - ADC_OFFSET)));
+        Semaphore_post(semCritical);
         for (x = 1; x < LCD_HORIZONTAL_MAX - 1; x++) {
             y2 = LCD_VERTICAL_MAX/2 - (int)roundf(fScale * ((int)(samples[x] - ADC_OFFSET)));
             GrLineDraw(&sContext, x-1, y, x, y2);
             y = y2;
         }
-        Semaphore_post(semCritical);
 
-        // Display time scale
+
         GrContextForegroundSet(&sContext, ClrWhite); // white text
-        GrStringDraw(&sContext, "20 us", -1, 0, 0, false);
 
-        // Display voltage scale
-        snprintf(str, sizeof(str), gVoltageScaleStr[vState]);
-        GrStringDraw(&sContext, str, -1, 50, 0, false);
-
-        // Display trigger
-        snprintf(str, sizeof(str), gTriggerStr[trigState]);
-        GrStringDraw(&sContext, str, -1, 110, 0, false);
-
-        // Display CPU load %
-        snprintf(str, sizeof(str), "CPU load = %.1f%%", cpu_load*100);
-        GrStringDraw(&sContext, str, -1, 0, 120, false);
-
+        if (spectrumMode) {
+            GrStringDraw(&sContext, "20 kHz", -1, 0, 0, false);
+            GrStringDraw(&sContext, "20 dB", -1, 50, 0, false);
+        } else {
+            GrStringDraw(&sContext, "20 us", -1, 0, 0, false);      // Time scale
+            snprintf(str, sizeof(str), gVoltageScaleStr[vState]);   // Voltage scale
+            GrStringDraw(&sContext, str, -1, 50, 0, false);
+            snprintf(str, sizeof(str), gTriggerStr[trigState]);     // Trigger state
+            GrStringDraw(&sContext, str, -1, 110, 0, false);
+            snprintf(str, sizeof(str), "CPU load = %.1f%%", cpu_load*100);  // CPU load
+            GrStringDraw(&sContext, str, -1, 0, 120, false);
+        }
         GrFlush(&sContext); // flush the frame buffer to the LCD
 
         Semaphore_post(semWaveform);

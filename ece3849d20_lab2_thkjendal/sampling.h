@@ -24,6 +24,7 @@ extern volatile int32_t gADCBufferIndex;                // latest sample index
 extern volatile uint16_t gADCBuffer[ADC_BUFFER_SIZE];   // circular buffer
 extern volatile uint32_t gADCErrors;                    // number of missed ADC deadlines
 
+extern volatile bool spectrumMode;  // whether device is in square mode or spectrum mode
 extern volatile uint16_t samples[ADC_TRIGGER_SIZE]; // sample to show on LCD screen
 extern volatile bool trigState; // 2 trigger states
 

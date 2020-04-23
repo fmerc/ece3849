@@ -32,22 +32,14 @@ volatile uint32_t gButtons = 0; // debounced button state, one per bit in the lo
 uint32_t gJoystick[2] = {0};    // joystick coordinates
 uint32_t gADCSamplingRate;      // [Hz] actual ADC sampling rate
 
-//typedef char DataType;      // FIFO data type
-volatile DataType fifo[FIFO_SIZE];  // FIFO storage array
-volatile int fifo_head = 0; // index of the first item in the FIFO
-volatile int fifo_tail = 0; // index one step past the last item
-
 // imported globals
 extern uint32_t gSystemClock;   // [Hz] system clock frequency
 extern volatile uint32_t gTime; // time in hundredths of a second
+extern volatile bool spectrumMode;
 
 // initialize all button and joystick handling hardware
 void ButtonInit(void)
 {
-    // initialize interrupt controller to respond to timer interrupts
-//    IntPrioritySet(INT_TIMER0A, BUTTON_INT_PRIORITY);
-//    IntEnable(INT_TIMER0A);
-
     // GPIO PJ0 and PJ1 = EK-TM4C1294XL buttons 1 and 2
     SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOJ);
     GPIOPinTypeGPIOInput(GPIO_PORTJ_BASE, GPIO_PIN_0 | GPIO_PIN_1);
@@ -161,37 +153,7 @@ uint32_t ButtonAutoRepeat(void)
 // ISR for scanning and debouncing buttons
 void ButtonISR(void) {
     TimerIntClear(TIMER0_BASE, TIMER_TIMA_TIMEOUT); // clear interrupt flag
-
-/*
-    // read hardware button state
-    uint32_t gpio_buttons =
-            (~GPIOPinRead(GPIO_PORTJ_BASE, 0xff) & (GPIO_PIN_1 | GPIO_PIN_0)) | // EK-TM4C1294XL buttons in positions 0 and 1
-            ((~GPIOPinRead(GPIO_PORTH_BASE, 0xff) & GPIO_PIN_1) << 1) |         // S1
-            ((~GPIOPinRead(GPIO_PORTK_BASE, 0xff) & GPIO_PIN_6) >> 3) |         // S2
-            (~GPIOPinRead(GPIO_PORTD_BASE, 0xff) & GPIO_PIN_4);                 // SEL
-
-
-    uint32_t old_buttons = gButtons;    // save previous button state
-    ButtonDebounce(gpio_buttons);       // Run the button debouncer. The result is in gButtons.
-    ButtonReadJoystick();               // Convert joystick state to button presses. The result is in gButtons.
-    uint32_t presses = ~old_buttons & gButtons;   // detect button presses (transitions from not pressed to pressed)
-    presses |= ButtonAutoRepeat();      // autorepeat presses if a button is held long enough
-
-    if (presses & 2)    // usr1
-        fifo_put('u');  // increment time
-    if (presses & 1)    // usr1
-        fifo_put('v');  // decrement time
-
-    if (presses & 16)    // usr2
-        fifo_put('t');  // trigger change
-
-    if (presses & 4)    // booster1
-        fifo_put('i');  // increment voltage
-    if (presses & 8)    // booster2
-        fifo_put('j');  // decrement voltage
-*/
 }
-
 
 void clock_func(UArg arg) {
     Semaphore_post(semButtons);
@@ -216,19 +178,24 @@ void buttonTask_func(UArg arg1, UArg arg2) {
         presses |= ButtonAutoRepeat();      // autorepeat presses if a button is held long enough
         char button;
 
+        if (presses & 1) {  // usr1
+            button = 'S';   // spectrum mode
+            Mailbox_post(mailbox0, &button, BIOS_WAIT_FOREVER);
+        }
+
         if (presses & 2) {  // usr2
-            button = 't';   // trigger change
-            Mailbox_post(mailbox0, &button, M0_TIMEOUT);
+            button = 'T';   // trigger change
+            Mailbox_post(mailbox0, &button, BIOS_WAIT_FOREVER);
         }
 
         if (presses & 4) {  // booster1
-            button = 'i';   // increment voltage
-            Mailbox_post(mailbox0, &button, M0_TIMEOUT);
+            button = 'V';   // increment voltage
+            Mailbox_post(mailbox0, &button, BIOS_WAIT_FOREVER);
         }
 
         if (presses & 8) {  // booster2
-            button = 'j';   // decrement voltage
-            Mailbox_post(mailbox0, &button, M0_TIMEOUT);
+            button = 'v';   // decrement voltage
+            Mailbox_post(mailbox0, &button, BIOS_WAIT_FOREVER);
         }
     }
 }
@@ -237,18 +204,24 @@ void buttonTask_func(UArg arg1, UArg arg2) {
 void userInputTask_func(UArg arg1, UArg arg2) {
     char buttons[10];   // button presses
     while (true) {
-        if (Mailbox_pend(mailbox0, &buttons, M0_TIMEOUT)) {
+        if (Mailbox_pend(mailbox0, &buttons, BIOS_WAIT_FOREVER)) {
             int i;
 
             Semaphore_pend(semCritical, BIOS_WAIT_FOREVER);
             for (i = 0; i < 10; i++) {
-                if (buttons[i]==('i') && gButtons == 4) { // increment voltage
-                    vState = (++vState) % 5;
-                } else if (buttons[i]==('j') && gButtons == 8) { // decrement voltage
-                    vState = (vState <= 0) ? 4 : vState - 1;
-                } else if (buttons[i]==('t') && gButtons == 2) { // change trigger
-                    trigState = !trigState;
-                }
+
+                if (buttons[i]==('S') && gButtons == 1)
+                    spectrumMode = !spectrumMode;   // change to spectrum mode
+
+                else if (buttons[i]==('T') && gButtons == 2)
+                    trigState = !trigState;         // change trigger
+
+                else if (buttons[i]==('V') && gButtons == 4)
+                    vState = (++vState) % 5;        // increment voltage
+
+                else if (buttons[i]==('v') && gButtons == 8)
+                    vState = (vState <= 0) ? 4 : vState - 1;    // decrement voltage
+
             }
             Semaphore_post(semCritical);
         }
