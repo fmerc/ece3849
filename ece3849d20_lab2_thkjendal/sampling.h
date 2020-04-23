@@ -25,7 +25,7 @@ extern volatile uint16_t gADCBuffer[ADC_BUFFER_SIZE];   // circular buffer
 extern volatile uint32_t gADCErrors;                    // number of missed ADC deadlines
 
 extern volatile bool spectrumMode;  // whether device is in square mode or spectrum mode
-extern volatile uint16_t samples[ADC_TRIGGER_SIZE]; // sample to show on LCD screen
+extern volatile uint16_t processedBuffer[ADC_TRIGGER_SIZE]; // sample to show on LCD screen
 extern volatile bool trigState; // 2 trigger states
 
 extern float fScale;
@@ -35,6 +35,7 @@ extern volatile int vState;
 void ADC_Init(void);
 int RisingTrigger(void);
 void signal_init(void);
+void cpu_clock_init(void);
 uint32_t cpu_load_count(void);
 
 #endif /* SAMPLING_H_ */

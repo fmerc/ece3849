@@ -12,9 +12,7 @@
 #include <ti/sysbios/BIOS.h>
 #include <ti/sysbios/knl/Task.h>
 
-#include <stdint.h>
 #include <stdbool.h>
-#include <math.h>
 #include "inc/hw_memmap.h"
 #include "inc/tm4c1294ncpdt.h"
 #include "driverlib/sysctl.h"
@@ -26,6 +24,7 @@
 #include "driverlib/pin_map.h"
 #include "Crystalfontz128x128_ST7735.h"
 #include "sysctl_pll.h"
+
 #include "buttons.h"
 #include "sampling.h"
 
@@ -41,8 +40,8 @@ volatile bool spectrumMode = false;
 volatile int32_t gADCBufferIndex = ADC_BUFFER_SIZE - 1;     // latest sample index
 volatile uint16_t gADCBuffer[ADC_BUFFER_SIZE];              // circular buffer
 volatile uint32_t gADCErrors = 0;                           // number of missed ADC deadlines
-volatile uint16_t fft_samples[NFFT];
-volatile uint16_t samples[ADC_TRIGGER_SIZE];
+volatile uint16_t samples[NFFT];
+volatile uint16_t processedBuffer[ADC_TRIGGER_SIZE];
 volatile bool trigState = true; // 2 trigger states
 
 volatile uint32_t trigger;
@@ -50,7 +49,7 @@ float fVoltsPerDiv[] = {0.1, 0.2, 0.5, 1, 2}; // voltage scale/div values
 float fScale;
 volatile int vState = 4;     // 5 voltage scale states
 
-// Initialize ADC handling hardware
+/* Initialize ADC handling hardware (ADC1 sequence 0) */
 void ADC_Init(void) {
     SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC1);
     GPIOPinTypeADC(GPIO_PORTP_BASE, GPIO_PIN_0);    // GPIO setup for analog input AIN3
@@ -70,7 +69,8 @@ void ADC_Init(void) {
     ADCSequenceEnable(ADC1_BASE, 0);    // enable the sequence.  it is now sampling
 }
 
-int RisingTrigger(void) {   // search for edge
+/* Find the edge of the waveform */
+int RisingTrigger(void) {
     // Step 1
     int index = gADCBufferIndex - LCD_HORIZONTAL_MAX/2;
     int iStop = index - ADC_BUFFER_SIZE/2;
@@ -101,7 +101,7 @@ int RisingTrigger(void) {   // search for edge
     return index;
 }
 
-
+/* Initialize PWM signal source */
 void signal_init(void) {
     // configure M0PWM2, at GPIO PF2, BoosterPack 1 header C1 pin 2
     // configure M0PWM3, at GPIO PF3, BoosterPack 1 header C1 pin 3
@@ -123,6 +123,15 @@ void signal_init(void) {
     PWMGenEnable(PWM0_BASE, PWM_GEN_1);
 }
 
+/* Configure Timer3 for CPU measurement */
+void cpu_clock_init(void) {
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER3);
+    TimerDisable(TIMER3_BASE, TIMER_BOTH);
+    TimerConfigure(TIMER3_BASE, TIMER_CFG_ONE_SHOT);
+    TimerLoadSet(TIMER3_BASE, TIMER_A, (gSystemClock/50) - 1);
+}
+
+/* Count CPU cycles */
 uint32_t cpu_load_count(void) {
     uint32_t i = 0;
     TimerIntClear(TIMER3_BASE, TIMER_TIMA_TIMEOUT);
@@ -132,7 +141,7 @@ uint32_t cpu_load_count(void) {
     return i;
 }
 
-// ISR for sampling ADC
+/* ISR for ADC sampling */
 void ADC_ISR(void) {
     ADC1_ISC_R = ADC_ISC_IN0;   // clear ADC1 sequence0 interrupt flag in the ADCISC register [datasheet pg 1085]
 
@@ -147,7 +156,7 @@ void ADC_ISR(void) {
 }
 
 
-// Task for creating a waveform, priority 10
+/* Waveform Task: create a waveform to display (high priority) */
 void waveformTask_func(UArg arg1, UArg arg2) {
     IntMasterEnable();
 
@@ -156,24 +165,18 @@ void waveformTask_func(UArg arg1, UArg arg2) {
 
         if (spectrumMode) {
             int i;
-
-            Semaphore_pend(semCritical, BIOS_WAIT_FOREVER);
             for (i = 0; i < NFFT; i++) {
-                fft_samples[i] = gADCBuffer[ADC_BUFFER_WRAP(gADCBufferIndex - NFFT + i)];
+                samples[i] = gADCBuffer[ADC_BUFFER_WRAP(gADCBufferIndex - NFFT + i)];
             }
-            Semaphore_post(semCritical);
-
-        } else {
-            Semaphore_pend(semCritical, BIOS_WAIT_FOREVER);
-            trigger = RisingTrigger(); // search for trigger
-            Semaphore_post(semCritical);
         }
+        else
+            trigger = RisingTrigger(); // search for trigger
 
         Semaphore_post(semProcessing);
     }
 }
 
-// Task for processing stuff, priority 2
+/* Processing Task: process stuff (lowest priority) */
 void processingTask_func(UArg arg1, UArg arg2) {
     static char kiss_fft_cfg_buffer[KISS_FFT_CFG_SIZE]; // Kiss FFT config memory
     size_t buffer_size = KISS_FFT_CFG_SIZE;
@@ -182,43 +185,36 @@ void processingTask_func(UArg arg1, UArg arg2) {
     int i;
     cfg = kiss_fft_alloc(NFFT, 0, kiss_fft_cfg_buffer, &buffer_size); // init Kiss FFT
 
-//    static float w[NFFT]; // window function
-//    for (i = 0; i < NFFT; i++) {
-//        // Blackman window
-//        w[i] = 0.42f - 0.5f * cosf(2*PI*i/(NFFT-1)) + 0.08f * cosf(4*PI*i/(NFFT-1));
-//    }
+    static float w[NFFT]; // window function
+    for (i = 0; i < NFFT; i++) {
+        // Blackman window
+        w[i] = 0.42f - 0.5f * cosf(2*PI*i/(NFFT-1)) + 0.08f * cosf(4*PI*i/(NFFT-1));
+    }
 
     while (true) {
         Semaphore_pend(semProcessing, BIOS_WAIT_FOREVER);
 
         if (spectrumMode) {
-
-            Semaphore_pend(semCritical, BIOS_WAIT_FOREVER);
+            fScale = 0.7;
             for (i = 0; i < NFFT; i++) {        // generate an input waveform
-                in[i].r = sinf(20*PI*i/NFFT);   // real part of waveform
-//                in[i].r = ((float)fft_samples[i] - trigger); // real part of waveform
+                in[i].r = (float)samples[i] * w[i];  // real part of waveform
                 in[i].i = 0;                    // imaginary part of waveform
             }
-            Semaphore_post(semCritical);
 
             kiss_fft(cfg, in, out);         // compute FFT
 
             // convert first 128 bins of out[] to dB for display
-            Semaphore_pend(semCritical, BIOS_WAIT_FOREVER);
             for (i = 0; i < ADC_TRIGGER_SIZE-1; i++) {
-                samples[i] = 128 - 10 * log10f(out[i].r * out[i].r + out[i].i * out[i].i);
+                processedBuffer[i] = 160 - roundf(10 * log10f(out[i].r * out[i].r + out[i].i * out[i].i));
             }
-            Semaphore_post(semCritical);
         }
 
         else {
             fScale = (VIN_RANGE * PIXELS_PER_DIV)/((1 << ADC_BITS) * fVoltsPerDiv[vState]);
 
-            Semaphore_pend(semCritical, BIOS_WAIT_FOREVER);
-            for (i = 0; i < ADC_TRIGGER_SIZE-1; i++) {// read gADCBuffer measurements into samples[]
-                samples[i] = gADCBuffer[ADC_BUFFER_WRAP(trigger - LCD_HORIZONTAL_MAX/2) + i];
+            for (i = 0; i < ADC_TRIGGER_SIZE-1; i++) {// read gADCBuffer measurements into processedBuf
+                processedBuffer[i] = gADCBuffer[ADC_BUFFER_WRAP(trigger - LCD_HORIZONTAL_MAX/2) + i];
             }
-            Semaphore_post(semCritical);
         }
 
         Semaphore_post(semWaveform);

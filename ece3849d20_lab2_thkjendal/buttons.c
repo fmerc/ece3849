@@ -13,16 +13,13 @@
 /* BIOS Header files */
 #include <ti/sysbios/BIOS.h>
 
-#include <stdint.h>
 #include <stdbool.h>
 #include "inc/hw_memmap.h"
-#include "inc/hw_ints.h"
 #include "driverlib/sysctl.h"
 #include "driverlib/gpio.h"
-#include "driverlib/timer.h"
-#include "driverlib/interrupt.h"
 #include "driverlib/adc.h"
 #include "sysctl_pll.h"
+
 #include "buttons.h"
 #include "sampling.h"
 
@@ -37,7 +34,7 @@ extern uint32_t gSystemClock;   // [Hz] system clock frequency
 extern volatile uint32_t gTime; // time in hundredths of a second
 extern volatile bool spectrumMode;
 
-// initialize all button and joystick handling hardware
+/* Initialize button and joystick handling hardware */
 void ButtonInit(void)
 {
     // GPIO PJ0 and PJ1 = EK-TM4C1294XL buttons 1 and 2
@@ -72,7 +69,6 @@ void ButtonInit(void)
     uint32_t pll_frequency = SysCtlFrequencyGet(CRYSTAL_FREQUENCY);
     uint32_t pll_divisor = (pll_frequency - 1) / (16 * ADC_SAMPLING_RATE) + 1; // round divisor up
     gADCSamplingRate = pll_frequency / (16 * pll_divisor); // actual sampling rate may differ from ADC_SAMPLING_RATE
-//    ADCClockConfigSet(ADC0_BASE, ADC_CLOCK_SRC_PLL | ADC_CLOCK_RATE_FULL, pll_divisor); // only ADC0 has PLL clock divisor control
 
     // initialize ADC sampling sequence
     ADCSequenceDisable(ADC0_BASE, 0);
@@ -82,7 +78,7 @@ void ButtonInit(void)
     ADCSequenceEnable(ADC0_BASE, 0);
 }
 
-// update the debounced button state gButtons
+/* Update the debounced button state gButtons */
 void ButtonDebounce(uint32_t buttons)
 {
     int32_t i, mask;
@@ -108,7 +104,7 @@ void ButtonDebounce(uint32_t buttons)
     }
 }
 
-// sample joystick and convert to button presses
+/* Sample joystick and convert to button presses */
 void ButtonReadJoystick(void)
 {
     ADCProcessorTrigger(ADC0_BASE, 0);          // trigger the ADC sample sequence for Joystick X and Y
@@ -130,7 +126,7 @@ void ButtonReadJoystick(void)
     if (gJoystick[1] > JOYSTICK_LOWER_RELEASE_THRESHOLD) gButtons &= ~(1 << 8);
 }
 
-// autorepeat button presses if a button is held long enough
+/* Autorepeat button presses if a button is held long enough */
 uint32_t ButtonAutoRepeat(void)
 {
     static int count[BUTTON_AND_JOYSTICK_COUNT] = {0}; // autorepeat counts
@@ -150,16 +146,12 @@ uint32_t ButtonAutoRepeat(void)
     return presses;
 }
 
-// ISR for scanning and debouncing buttons
-void ButtonISR(void) {
-    TimerIntClear(TIMER0_BASE, TIMER_TIMA_TIMEOUT); // clear interrupt flag
-}
-
+/* Check buttons (run buttonTask) periodically */
 void clock_func(UArg arg) {
     Semaphore_post(semButtons);
 }
 
-// Task for reading buttons, priority 8
+/* Button Task: read buttons (highest priority) */
 void buttonTask_func(UArg arg1, UArg arg2) {
     while (true) {
         Semaphore_pend(semButtons, BIOS_WAIT_FOREVER);
@@ -200,14 +192,13 @@ void buttonTask_func(UArg arg1, UArg arg2) {
     }
 }
 
-// Task for user input, priority 6
+/* User Input Task: read user input (medium priority) */
 void userInputTask_func(UArg arg1, UArg arg2) {
     char buttons[10];   // button presses
     while (true) {
         if (Mailbox_pend(mailbox0, &buttons, BIOS_WAIT_FOREVER)) {
             int i;
 
-            Semaphore_pend(semCritical, BIOS_WAIT_FOREVER);
             for (i = 0; i < 10; i++) {
 
                 if (buttons[i]==('S') && gButtons == 1)
@@ -223,7 +214,6 @@ void userInputTask_func(UArg arg1, UArg arg2) {
                     vState = (vState <= 0) ? 4 : vState - 1;    // decrement voltage
 
             }
-            Semaphore_post(semCritical);
         }
 
         Semaphore_post(semDisplay);
