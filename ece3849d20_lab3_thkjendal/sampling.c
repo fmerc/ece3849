@@ -22,6 +22,7 @@
 #include "driverlib/adc.h"
 #include "driverlib/pwm.h"
 #include "driverlib/pin_map.h"
+#include "driverlib/udma.h"
 #include "Crystalfontz128x128_ST7735.h"
 #include "sysctl_pll.h"
 
@@ -37,17 +38,22 @@
 volatile bool spectrumMode = false;
 
 // ADC Sampling
-volatile int32_t gADCBufferIndex = ADC_BUFFER_SIZE - 1;     // latest sample index
+//volatile int32_t gADCBufferIndex = ADC_BUFFER_SIZE - 1;     // latest sample index
 volatile uint16_t gADCBuffer[ADC_BUFFER_SIZE];              // circular buffer
 volatile uint32_t gADCErrors = 0;                           // number of missed ADC deadlines
 volatile uint16_t samples[NFFT];
 volatile uint16_t processedBuffer[ADC_TRIGGER_SIZE];
-volatile bool trigState = true; // 2 trigger states
+volatile bool trigState = true;
 
-volatile uint32_t trigger;
+// DMA init
+#pragma DATA_ALIGN(gDMAControlTable, 1024) // address alignment required
+tDMAControlTable gDMAControlTable[64];     // uDMA control table (global)
+
+volatile bool gDMAPrimary = true;   // is DMA occurring in the primary channel?
 float fVoltsPerDiv[] = {0.1, 0.2, 0.5, 1, 2}; // voltage scale/div values
+volatile uint32_t trigger;
+volatile int vState = 4;
 float fScale;
-volatile int vState = 4;     // 5 voltage scale states
 
 /* Initialize ADC handling hardware (ADC1 sequence 0) */
 void ADC_Init(void) {
@@ -69,10 +75,56 @@ void ADC_Init(void) {
     ADCSequenceEnable(ADC1_BASE, 0);    // enable the sequence.  it is now sampling
 }
 
+/* Initialize DMA handling hardware (ADC1 sequence 0 -> gADCBuffer */
+void DMA_Init(void) {
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_UDMA);
+    uDMAEnable();
+    uDMAControlBaseSet(gDMAControlTable);
+
+    uDMAChannelAssign(UDMA_CH24_ADC1_0); // assign DMA channel 24 to ADC1 sequence 0
+    uDMAChannelAttributeDisable(UDMA_SEC_CHANNEL_ADC10, UDMA_ATTR_ALL);
+
+    // primary DMA channel = first half of the ADC buffer
+    uDMAChannelControlSet(UDMA_SEC_CHANNEL_ADC10 | UDMA_PRI_SELECT,
+        UDMA_SIZE_16 | UDMA_SRC_INC_NONE | UDMA_DST_INC_16 | UDMA_ARB_4);
+    uDMAChannelTransferSet(UDMA_SEC_CHANNEL_ADC10 | UDMA_PRI_SELECT,
+        UDMA_MODE_PINGPONG, (void*)&ADC1_SSFIFO0_R,
+        (void*)&gADCBuffer[0], ADC_BUFFER_SIZE/2);
+
+    // alternate DMA channel = second half of the ADC buffer
+    uDMAChannelControlSet(UDMA_SEC_CHANNEL_ADC10 | UDMA_ALT_SELECT,
+        UDMA_SIZE_16 | UDMA_SRC_INC_NONE | UDMA_DST_INC_16 | UDMA_ARB_4);
+    uDMAChannelTransferSet(UDMA_SEC_CHANNEL_ADC10 | UDMA_ALT_SELECT,
+        UDMA_MODE_PINGPONG, (void*)&ADC1_SSFIFO0_R,
+        (void*)&gADCBuffer[ADC_BUFFER_SIZE/2], ADC_BUFFER_SIZE/2);
+
+    uDMAChannelEnable(UDMA_SEC_CHANNEL_ADC10);
+
+    ADCSequenceDMAEnable(ADC1_BASE, 0);         // enable DMA for ADC1 sequence 0
+    ADCIntEnableEx(ADC1_BASE, ADC_INT_DMA_SS0); // enable ADC1 sequence 0 DMA interrupt
+}
+
+/* Get the index for gADCBuffer */
+int32_t getADCBufferIndex(void) {
+    int32_t index;
+    IArg key;
+    key = GateHwi_enter(gateHwi0);
+    if (gDMAPrimary) {  // DMA is currently in the primary channel
+        index = ADC_BUFFER_SIZE/2 - 1 -
+                uDMAChannelSizeGet(UDMA_SEC_CHANNEL_ADC10 | UDMA_PRI_SELECT);
+    }
+    else {              // DMA is currently in the alternate channel
+        index = ADC_BUFFER_SIZE - 1 -
+                uDMAChannelSizeGet(UDMA_SEC_CHANNEL_ADC10 | UDMA_ALT_SELECT);
+    }
+    GateHwi_leave(gateHwi0, key);
+    return index;
+}
+
 /* Find the edge of the waveform */
 int RisingTrigger(void) {
     // Step 1
-    int index = gADCBufferIndex - LCD_HORIZONTAL_MAX/2;
+    int index = getADCBufferIndex();
     int iStop = index - ADC_BUFFER_SIZE/2;
 
     // Step 2
@@ -96,7 +148,7 @@ int RisingTrigger(void) {
 
     // Step 3
     if (index == iStop)    // for loop ran to the end
-        index = gADCBufferIndex - LCD_HORIZONTAL_MAX/2;     // set back to previous value
+        index = getADCBufferIndex() - LCD_HORIZONTAL_MAX/2;     // set back to previous value
 
     return index;
 }
@@ -142,19 +194,31 @@ uint32_t cpu_load_count(void) {
 }
 
 /* ISR for ADC sampling */
-void ADC_ISR(void) {
-    ADC1_ISC_R = ADC_ISC_IN0;   // clear ADC1 sequence0 interrupt flag in the ADCISC register [datasheet pg 1085]
+void ADC_ISR(void) {    // DMA (lab 3)
+    ADCIntClearEx(ADC1_BASE, ADC_INT_DMA_SS0);  // clear the ADC1 sequence 0 DMA interrupt flag
 
-    if (ADC1_OSTAT_R & ADC_OSTAT_OV0) {     // check for ADC FIFO overflow
-        gADCErrors++;                       // count errors
-        ADC1_OSTAT_R = ADC_OSTAT_OV0;       // clear overflow condition
+    // Check the primary DMA channel for end of transfer, and restart if needed.
+    if (uDMAChannelModeGet(UDMA_SEC_CHANNEL_ADC10 | UDMA_PRI_SELECT) == UDMA_MODE_STOP) {
+        // restart the primary channel (same as setup)
+        uDMAChannelTransferSet(UDMA_SEC_CHANNEL_ADC10 | UDMA_PRI_SELECT, UDMA_MODE_PINGPONG,
+                               (void*)&ADC1_SSFIFO0_R, (void*)&gADCBuffer[0], ADC_BUFFER_SIZE/2);
+        gDMAPrimary = false;    // DMA is currently occurring in the alternate buffer
     }
 
-    gADCBuffer[
-               gADCBufferIndex = ADC_BUFFER_WRAP(gADCBufferIndex + 1)
-               ] = ADC1_SSFIFO0_R;      // read sample from the ADC1 sequence 0 FIFO [datasheet pg 1111]
-}
+    // Check the alternate DMA channel for end of transfer, and restart if needed.
+    // Also set the gDMAPrimary global.
+    if (uDMAChannelModeGet(UDMA_SEC_CHANNEL_ADC10 | UDMA_ALT_SELECT) == UDMA_MODE_STOP) {
+        // restart the primary channel (same as setup)
+        uDMAChannelTransferSet(UDMA_SEC_CHANNEL_ADC10 | UDMA_ALT_SELECT, UDMA_MODE_PINGPONG,
+                               (void*)&ADC1_SSFIFO0_R, (void*)&gADCBuffer[ADC_BUFFER_SIZE/2], ADC_BUFFER_SIZE/2);
+        gDMAPrimary = true;    // DMA is currently occurring in the alternate buffer
+    }
 
+    // The DMA channel may be disabled if the CPU is paused by the debugger.
+    if (!uDMAChannelIsEnabled(UDMA_SEC_CHANNEL_ADC10)) {
+        uDMAChannelEnable(UDMA_SEC_CHANNEL_ADC10);  // re-enable the DMA channel
+    }
+}
 
 /* Waveform Task: create a waveform to display (high priority) */
 void waveformTask_func(UArg arg1, UArg arg2) {
@@ -165,8 +229,9 @@ void waveformTask_func(UArg arg1, UArg arg2) {
 
         if (spectrumMode) {
             int i;
+            int index = getADCBufferIndex();
             for (i = 0; i < NFFT; i++) {
-                samples[i] = gADCBuffer[ADC_BUFFER_WRAP(gADCBufferIndex - NFFT + i)];
+                samples[i] = gADCBuffer[ADC_BUFFER_WRAP(index - NFFT + i)];
             }
         }
         else

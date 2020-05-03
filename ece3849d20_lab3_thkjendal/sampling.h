@@ -20,7 +20,7 @@
 #define ADC_BITS 12         // the ADC has 12 bits
 
 extern uint32_t gSystemClock;                           // [Hz] system clock frequency
-extern volatile int32_t gADCBufferIndex;                // latest sample index
+//extern volatile int32_t gADCBufferIndex;                // latest sample index
 extern volatile uint16_t gADCBuffer[ADC_BUFFER_SIZE];   // circular buffer
 extern volatile uint32_t gADCErrors;                    // number of missed ADC deadlines
 
@@ -33,6 +33,7 @@ extern volatile int vState;
 
 // Initialize ADC handling hardware
 void ADC_Init(void);
+void DMA_Init(void);
 int RisingTrigger(void);
 void signal_init(void);
 void cpu_clock_init(void);

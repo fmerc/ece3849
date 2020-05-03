@@ -50,6 +50,7 @@ int main(void)
     cpu_clock_init();
     ButtonInit();
     ADC_Init();
+    DMA_Init();
     signal_init();
 
     count_unloaded = cpu_load_count();  // measure CPU
