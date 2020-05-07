@@ -66,7 +66,9 @@ float fScale;
 
 // audio
 uint32_t gPWMSample = 0;            // PWM sample counter
-uint32_t gSamplingRateDivider = 29; // sampling rate divider
+uint32_t gSamplingRateDivider = 70;    // sampling rate divider
+
+
 
 /* Configure timer for frequency counter */
 void FreqTimer(void) {
@@ -84,6 +86,8 @@ void FreqTimer(void) {
     TimerIntEnable(TIMER0_BASE, TIMER_CAPA_EVENT);  // 'CaptureA event interrupt' in timer.h
     TimerEnable(TIMER0_BASE, TIMER_A);
 }
+
+
 
 /* Initialize ADC & DMA handling hardware (ADC1 sequence) */
 void DMA_Init(void) {
@@ -131,6 +135,8 @@ void DMA_Init(void) {
     ADCSequenceEnable(ADC1_BASE, 0);    // enable the sequence.  it is now sampling
 }
 
+
+
 /* Initialize PWM signal source */
 void PWM_Init(void) {
     // configure M0PWM2, at GPIO PF2, BoosterPack 1 header C1 pin 2
@@ -139,8 +145,7 @@ void PWM_Init(void) {
     GPIOPinTypePWM(GPIO_PORTF_BASE, GPIO_PIN_2 | GPIO_PIN_3);
     GPIOPinConfigure(GPIO_PF2_M0PWM2);
     GPIOPinConfigure(GPIO_PF3_M0PWM3);
-    GPIOPadConfigSet(GPIO_PORTF_BASE, GPIO_PIN_2 | GPIO_PIN_3,
-                     GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD);
+    GPIOPadConfigSet(GPIO_PORTF_BASE, GPIO_PIN_2 | GPIO_PIN_3, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD);
 
     // configure the PWM0 peripheral, gen 1, outputs 2 and 3
     SysCtlPeripheralEnable(SYSCTL_PERIPH_PWM0);
@@ -157,18 +162,19 @@ void PWM_Init(void) {
     SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOG);
     GPIOPinTypePWM(GPIO_PORTG_BASE, GPIO_PIN_1);
     GPIOPinConfigure(GPIO_PG1_M0PWM5);
-    GPIOPadConfigSet(GPIO_PORTG_BASE, GPIO_PIN_1,
-                     GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD);
+    GPIOPadConfigSet(GPIO_PORTG_BASE, GPIO_PIN_1, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD);
 
     // configure the PWM0 peripheral, gen 2, output 5
     PWMGenConfigure(PWM0_BASE, PWM_GEN_2, PWM_GEN_MODE_DOWN | PWM_GEN_MODE_NO_SYNC);
-    PWMGenPeriodSet(PWM0_BASE, PWM_GEN_2, PWM_PERIOD);
+    PWMGenPeriodSet(PWM0_BASE, PWM_GEN_2, PWM_PERIOD);      // 258
     PWMPulseWidthSet(PWM0_BASE, PWM_OUT_5, PWM_PERIOD/2);
     PWMOutputState(PWM0_BASE, PWM_OUT_5_BIT, true);
-    PWMGenIntTrigEnable(PWM0_BASE, PWM_GEN_2, PWM_INT_CNT_ZERO);
     PWMGenEnable(PWM0_BASE, PWM_GEN_2);
 
+    PWMGenIntTrigEnable(PWM0_BASE, PWM_GEN_2, PWM_INT_CNT_ZERO);
 }
+
+
 
 /* Configure Timer3 for CPU measurement */
 void cpu_clock_init(void) {
@@ -177,6 +183,8 @@ void cpu_clock_init(void) {
     TimerConfigure(TIMER3_BASE, TIMER_CFG_ONE_SHOT);
     TimerLoadSet(TIMER3_BASE, TIMER_A, (gSystemClock/50) - 1);
 }
+
+
 
 /* Count CPU cycles */
 uint32_t cpu_load_count(void) {
@@ -187,6 +195,8 @@ uint32_t cpu_load_count(void) {
         i++;
     return i;
 }
+
+
 
 /* Get the index for gADCBuffer */
 int32_t getADCBufferIndex(void) {
@@ -204,6 +214,8 @@ int32_t getADCBufferIndex(void) {
     GateHwi_leave(gateHwi0, key);
     return index;
 }
+
+
 
 /* Find the edge of the waveform */
 int RisingTrigger(void) {
@@ -237,6 +249,8 @@ int RisingTrigger(void) {
     return index;
 }
 
+
+
 /* ISR for ADC sampling */
 void ADC_ISR(void) {    // DMA (lab 3)
     ADCIntClearEx(ADC1_BASE, ADC_INT_DMA_SS0);  // clear the ADC1 sequence 0 DMA interrupt flag
@@ -264,6 +278,8 @@ void ADC_ISR(void) {    // DMA (lab 3)
     }
 }
 
+
+
 /* ISR for for timer capture */
 void Capture_ISR(void) {
     TIMER0_ICR_R = TIMER_ICR_CAECINT;   // clear interrupt
@@ -275,6 +291,8 @@ void Capture_ISR(void) {
     countPeriod++;            // track # of periods
     countInterval += timerPeriod;  // track interval of countPeriod
 }
+
+
 
 /* ISR for PWM audio waveform */
 void PWM_ISR(void)
@@ -288,6 +306,8 @@ void PWM_ISR(void)
         gPWMSample = 0; // reset sample index so the waveform starts from the beginning
     }
 }
+
+
 
 /* Waveform Task: create a waveform to display (high priority) */
 void waveformTask_func(UArg arg1, UArg arg2) {
@@ -309,6 +329,8 @@ void waveformTask_func(UArg arg1, UArg arg2) {
         Semaphore_post(semProcessing);
     }
 }
+
+
 
 /* Processing Task: process stuff (lowest priority) */
 void processingTask_func(UArg arg1, UArg arg2) {
@@ -355,6 +377,8 @@ void processingTask_func(UArg arg1, UArg arg2) {
         Semaphore_post(semDisplay);
     }
 }
+
+
 
 /* Frequency Task: calculate frequency capture */
 void frequencyTask_func(UArg arg1, UArg arg2) {

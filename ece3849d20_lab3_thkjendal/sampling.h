@@ -8,8 +8,6 @@
 #ifndef SAMPLING_H_
 #define SAMPLING_H_
 
-#define PWM_PERIOD 258  // audio pwm period thing
-
 #define ADC_BUFFER_SIZE 2048    // size must be a power of 2
 #define ADC_TRIGGER_SIZE 128
 #define ADC_OFFSET       128

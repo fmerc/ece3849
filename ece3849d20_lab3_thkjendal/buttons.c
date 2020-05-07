@@ -79,6 +79,8 @@ void ButtonInit(void)
     ADCSequenceEnable(ADC0_BASE, 0);
 }
 
+
+
 /* Update the debounced button state gButtons */
 void ButtonDebounce(uint32_t buttons)
 {
@@ -105,6 +107,8 @@ void ButtonDebounce(uint32_t buttons)
     }
 }
 
+
+
 /* Sample joystick and convert to button presses */
 void ButtonReadJoystick(void)
 {
@@ -127,6 +131,8 @@ void ButtonReadJoystick(void)
     if (gJoystick[1] > JOYSTICK_LOWER_RELEASE_THRESHOLD) gButtons &= ~(1 << 8);
 }
 
+
+
 /* Autorepeat button presses if a button is held long enough */
 uint32_t ButtonAutoRepeat(void)
 {
@@ -147,10 +153,14 @@ uint32_t ButtonAutoRepeat(void)
     return presses;
 }
 
+
+
 /* Check buttons (run buttonTask) periodically */
 void clock_func(UArg arg) {
     Semaphore_post(semButtons);
 }
+
+
 
 /* Button Task: read buttons (highest priority) */
 void buttonTask_func(UArg arg1, UArg arg2) {
@@ -197,6 +207,8 @@ void buttonTask_func(UArg arg1, UArg arg2) {
         }
     }
 }
+
+
 
 /* User Input Task: read user input (medium priority) */
 void userInputTask_func(UArg arg1, UArg arg2) {

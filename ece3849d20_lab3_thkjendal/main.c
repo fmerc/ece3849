@@ -126,6 +126,8 @@ void displayTask_func(UArg arg1, UArg arg2) {
     }
 }
 
+
+
 /* Initialize LCD for display*/
 void LCD_Init(void) {
     Crystalfontz128x128_Init();
