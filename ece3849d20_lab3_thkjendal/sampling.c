@@ -28,6 +28,7 @@
 
 #include "buttons.h"
 #include "sampling.h"
+#include "audio_waveform.h"
 
 // KISS FFT
 #include "kiss_fft.h"
@@ -45,6 +46,13 @@ volatile uint16_t samples[NFFT];
 volatile uint16_t processedBuffer[ADC_TRIGGER_SIZE];
 volatile bool trigState = true;
 
+// Time Capture
+uint32_t prevCount = 0;
+uint32_t timerPeriod = 0;
+uint32_t countInterval = 0;
+uint32_t countPeriod = 0;
+float avgFrequency = 0;
+
 // DMA init
 #pragma DATA_ALIGN(gDMAControlTable, 1024) // address alignment required
 tDMAControlTable gDMAControlTable[64];     // uDMA control table (global)
@@ -53,10 +61,33 @@ volatile bool gDMAPrimary = true;   // is DMA occurring in the primary channel?
 float fVoltsPerDiv[] = {0.1, 0.2, 0.5, 1, 2}; // voltage scale/div values
 volatile uint32_t trigger;
 volatile int vState = 4;
+volatile int pwmPeriod = 6000;
 float fScale;
 
-/* Initialize ADC handling hardware (ADC1 sequence 0) */
-void ADC_Init(void) {
+// audio
+uint32_t gPWMSample = 0;            // PWM sample counter
+uint32_t gSamplingRateDivider = 29; // sampling rate divider
+
+/* Configure timer for frequency counter */
+void FreqTimer(void) {
+    // configure GPIO PD0 as timer input T0CCP0 at BoosterPack Connector #1 pin 14
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOD);
+    GPIOPinTypeTimer(GPIO_PORTD_BASE, GPIO_PIN_0);
+    GPIOPinConfigure(GPIO_PD0_T0CCP0);
+
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER0);
+    TimerDisable(TIMER0_BASE, TIMER_BOTH);
+    TimerConfigure(TIMER0_BASE, TIMER_CFG_SPLIT_PAIR | TIMER_CFG_A_CAP_TIME_UP);
+    TimerControlEvent(TIMER0_BASE, TIMER_A, TIMER_EVENT_POS_EDGE);
+    TimerLoadSet(TIMER0_BASE, TIMER_A, 0xffff);     // use maximum load value
+    TimerPrescaleSet(TIMER0_BASE, TIMER_A, 0xff);   // use maximum prescale value
+    TimerIntEnable(TIMER0_BASE, TIMER_CAPA_EVENT);  // 'CaptureA event interrupt' in timer.h
+    TimerEnable(TIMER0_BASE, TIMER_A);
+}
+
+/* Initialize ADC & DMA handling hardware (ADC1 sequence) */
+void DMA_Init(void) {
+    // ADC config
     SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC1);
     GPIOPinTypeADC(GPIO_PORTP_BASE, GPIO_PIN_0);    // GPIO setup for analog input AIN3
 
@@ -70,13 +101,8 @@ void ADC_Init(void) {
     ADCSequenceDisable(ADC1_BASE, 0);                           // choose ADC1 sequence 0; disable before configuring
     ADCSequenceConfigure(ADC1_BASE, 0, ADC_TRIGGER_ALWAYS, 0);  // specify the "Always" trigger
     ADCSequenceStepConfigure(ADC1_BASE, 0, 0, ADC_CTL_IE | ADC_CTL_END |ADC_CTL_CH3);   // in the 0th step, sample channel 3 (AIN3)
-                                                                // enable interrupt, and make it the end of sequence
-    ADCIntEnable(ADC1_BASE, 0);         // enable sequence 0 interrupt in the ADC1 peripheral
-    ADCSequenceEnable(ADC1_BASE, 0);    // enable the sequence.  it is now sampling
-}
 
-/* Initialize DMA handling hardware (ADC1 sequence 0 -> gADCBuffer */
-void DMA_Init(void) {
+    // DMA config
     SysCtlPeripheralEnable(SYSCTL_PERIPH_UDMA);
     uDMAEnable();
     uDMAControlBaseSet(gDMAControlTable);
@@ -102,6 +128,64 @@ void DMA_Init(void) {
 
     ADCSequenceDMAEnable(ADC1_BASE, 0);         // enable DMA for ADC1 sequence 0
     ADCIntEnableEx(ADC1_BASE, ADC_INT_DMA_SS0); // enable ADC1 sequence 0 DMA interrupt
+    ADCSequenceEnable(ADC1_BASE, 0);    // enable the sequence.  it is now sampling
+}
+
+/* Initialize PWM signal source */
+void PWM_Init(void) {
+    // configure M0PWM2, at GPIO PF2, BoosterPack 1 header C1 pin 2
+    // configure M0PWM3, at GPIO PF3, BoosterPack 1 header C1 pin 3
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOF);
+    GPIOPinTypePWM(GPIO_PORTF_BASE, GPIO_PIN_2 | GPIO_PIN_3);
+    GPIOPinConfigure(GPIO_PF2_M0PWM2);
+    GPIOPinConfigure(GPIO_PF3_M0PWM3);
+    GPIOPadConfigSet(GPIO_PORTF_BASE, GPIO_PIN_2 | GPIO_PIN_3,
+                     GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD);
+
+    // configure the PWM0 peripheral, gen 1, outputs 2 and 3
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_PWM0);
+    PWMClockSet(PWM0_BASE, PWM_SYSCLK_DIV_1); // use system clock without division
+    PWMGenConfigure(PWM0_BASE, PWM_GEN_1, PWM_GEN_MODE_DOWN | PWM_GEN_MODE_NO_SYNC);
+    PWMGenPeriodSet(PWM0_BASE, PWM_GEN_1, pwmPeriod);
+    PWMPulseWidthSet(PWM0_BASE, PWM_OUT_2, roundf((float)pwmPeriod*0.4f));
+    PWMPulseWidthSet(PWM0_BASE, PWM_OUT_3, roundf((float)pwmPeriod*0.4f));
+    PWMOutputState(PWM0_BASE, PWM_OUT_2_BIT | PWM_OUT_3_BIT, true);
+    PWMGenEnable(PWM0_BASE, PWM_GEN_1);
+
+
+    // configure M0PWM5, at GPIO PG1
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOG);
+    GPIOPinTypePWM(GPIO_PORTG_BASE, GPIO_PIN_1);
+    GPIOPinConfigure(GPIO_PG1_M0PWM5);
+    GPIOPadConfigSet(GPIO_PORTG_BASE, GPIO_PIN_1,
+                     GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD);
+
+    // configure the PWM0 peripheral, gen 2, output 5
+    PWMGenConfigure(PWM0_BASE, PWM_GEN_2, PWM_GEN_MODE_DOWN | PWM_GEN_MODE_NO_SYNC);
+    PWMGenPeriodSet(PWM0_BASE, PWM_GEN_2, PWM_PERIOD);
+    PWMPulseWidthSet(PWM0_BASE, PWM_OUT_5, PWM_PERIOD/2);
+    PWMOutputState(PWM0_BASE, PWM_OUT_5_BIT, true);
+    PWMGenIntTrigEnable(PWM0_BASE, PWM_GEN_2, PWM_INT_CNT_ZERO);
+    PWMGenEnable(PWM0_BASE, PWM_GEN_2);
+
+}
+
+/* Configure Timer3 for CPU measurement */
+void cpu_clock_init(void) {
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER3);
+    TimerDisable(TIMER3_BASE, TIMER_BOTH);
+    TimerConfigure(TIMER3_BASE, TIMER_CFG_ONE_SHOT);
+    TimerLoadSet(TIMER3_BASE, TIMER_A, (gSystemClock/50) - 1);
+}
+
+/* Count CPU cycles */
+uint32_t cpu_load_count(void) {
+    uint32_t i = 0;
+    TimerIntClear(TIMER3_BASE, TIMER_TIMA_TIMEOUT);
+    TimerEnable(TIMER3_BASE, TIMER_A);  // start timer in one-shot mode
+    while (!(TimerIntStatus(TIMER3_BASE, false) & TIMER_TIMA_TIMEOUT))
+        i++;
+    return i;
 }
 
 /* Get the index for gADCBuffer */
@@ -153,46 +237,6 @@ int RisingTrigger(void) {
     return index;
 }
 
-/* Initialize PWM signal source */
-void signal_init(void) {
-    // configure M0PWM2, at GPIO PF2, BoosterPack 1 header C1 pin 2
-    // configure M0PWM3, at GPIO PF3, BoosterPack 1 header C1 pin 3
-    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOF);
-    GPIOPinTypePWM(GPIO_PORTF_BASE, GPIO_PIN_2 | GPIO_PIN_3);
-    GPIOPinConfigure(GPIO_PF2_M0PWM2);
-    GPIOPinConfigure(GPIO_PF3_M0PWM3);
-    GPIOPadConfigSet(GPIO_PORTF_BASE, GPIO_PIN_2 | GPIO_PIN_3,
-                     GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD);
-
-    // configure the PWM0 peripheral, gen 1, outputs 2 and 3
-    SysCtlPeripheralEnable(SYSCTL_PERIPH_PWM0);
-    PWMClockSet(PWM0_BASE, PWM_SYSCLK_DIV_1); // use system clock without division
-    PWMGenConfigure(PWM0_BASE, PWM_GEN_1, PWM_GEN_MODE_DOWN | PWM_GEN_MODE_NO_SYNC);
-    PWMGenPeriodSet(PWM0_BASE, PWM_GEN_1, roundf((float)gSystemClock/PWM_FREQUENCY));
-    PWMPulseWidthSet(PWM0_BASE, PWM_OUT_2, roundf((float)gSystemClock/PWM_FREQUENCY*0.4f));
-    PWMPulseWidthSet(PWM0_BASE, PWM_OUT_3, roundf((float)gSystemClock/PWM_FREQUENCY*0.4f));
-    PWMOutputState(PWM0_BASE, PWM_OUT_2_BIT | PWM_OUT_3_BIT, true);
-    PWMGenEnable(PWM0_BASE, PWM_GEN_1);
-}
-
-/* Configure Timer3 for CPU measurement */
-void cpu_clock_init(void) {
-    SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER3);
-    TimerDisable(TIMER3_BASE, TIMER_BOTH);
-    TimerConfigure(TIMER3_BASE, TIMER_CFG_ONE_SHOT);
-    TimerLoadSet(TIMER3_BASE, TIMER_A, (gSystemClock/50) - 1);
-}
-
-/* Count CPU cycles */
-uint32_t cpu_load_count(void) {
-    uint32_t i = 0;
-    TimerIntClear(TIMER3_BASE, TIMER_TIMA_TIMEOUT);
-    TimerEnable(TIMER3_BASE, TIMER_A);  // start timer in one-shot mode
-    while (!(TimerIntStatus(TIMER3_BASE, false) & TIMER_TIMA_TIMEOUT))
-        i++;
-    return i;
-}
-
 /* ISR for ADC sampling */
 void ADC_ISR(void) {    // DMA (lab 3)
     ADCIntClearEx(ADC1_BASE, ADC_INT_DMA_SS0);  // clear the ADC1 sequence 0 DMA interrupt flag
@@ -217,6 +261,31 @@ void ADC_ISR(void) {    // DMA (lab 3)
     // The DMA channel may be disabled if the CPU is paused by the debugger.
     if (!uDMAChannelIsEnabled(UDMA_SEC_CHANNEL_ADC10)) {
         uDMAChannelEnable(UDMA_SEC_CHANNEL_ADC10);  // re-enable the DMA channel
+    }
+}
+
+/* ISR for for timer capture */
+void Capture_ISR(void) {
+    TIMER0_ICR_R = TIMER_ICR_CAECINT;   // clear interrupt
+
+    uint32_t count = TimerValueGet(TIMER0_BASE, TIMER_A);   // read 24-bit
+    timerPeriod = (count - prevCount) & 0xFFFFFF;           // set timerPeriod
+    prevCount = count;                                      // update prevCount
+
+    countPeriod++;            // track # of periods
+    countInterval += timerPeriod;  // track interval of countPeriod
+}
+
+/* ISR for PWM audio waveform */
+void PWM_ISR(void)
+{
+    PWM0_ISC_R = PWM_0_ISC_INTCNTZERO;  // clear PWM interrupt flag
+
+    int i = (gPWMSample++) / gSamplingRateDivider; // waveform sample index
+    PWM0_2_CMPB_R = 1 + gWaveform[i]; // write directly to the PWM compare B register
+    if (i >= gWaveformSize) { // if at the end of the waveform array
+        PWMIntDisable(PWM0_BASE, PWM_INT_GEN_2); // disable these interrupts
+        gPWMSample = 0; // reset sample index so the waveform starts from the beginning
     }
 }
 
@@ -270,7 +339,7 @@ void processingTask_func(UArg arg1, UArg arg2) {
 
             // convert first 128 bins of out[] to dB for display
             for (i = 0; i < ADC_TRIGGER_SIZE-1; i++) {
-                processedBuffer[i] = 160 - roundf(10 * log10f(out[i].r * out[i].r + out[i].i * out[i].i));
+                processedBuffer[i] = 180 - roundf(10 * log10f(out[i].r * out[i].r + out[i].i * out[i].i));
             }
         }
 
@@ -285,4 +354,29 @@ void processingTask_func(UArg arg1, UArg arg2) {
         Semaphore_post(semWaveform);
         Semaphore_post(semDisplay);
     }
+}
+
+/* Frequency Task: calculate frequency capture */
+void frequencyTask_func(UArg arg1, UArg arg2) {
+    IArg key;
+    uint32_t count, interval;
+
+    while (true) {
+        Semaphore_pend(semFrequency, BIOS_WAIT_FOREVER);
+
+        key = GateHwi_enter(gateHwi0);
+        interval = countInterval;
+        count = countPeriod;
+        countInterval = 0;
+        countPeriod = 0;
+        GateHwi_leave(gateHwi0, key);
+
+        float avgPeriod = (float)interval / count;
+        avgFrequency = (float)gSystemClock / avgPeriod;
+    }
+}
+
+/* Check frequency (run frequencyTask) periodically */
+void freq_func(UArg arg) {
+    Semaphore_post(semFrequency);
 }

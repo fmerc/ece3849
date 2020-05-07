@@ -6,19 +6,21 @@
 
 /* XDCtools Header files */
 #include <xdc/std.h>
-#include <xdc/runtime/System.h>
-#include <xdc/cfg/global.h>
 
 /* BIOS Header files */
 #include <ti/sysbios/BIOS.h>
-#include <ti/sysbios/knl/Task.h>
+#include <ti/sysbios/knl/Semaphore.h>
+#include <configPkg/package/cfg/rtos_pem4f.h>
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <math.h>
 
 /* Lab 1 header files */
+#include "grlib/grlib.h"
 #include "driverlib/interrupt.h"
+#include "driverlib/sysctl.h"
 #include "Crystalfontz128x128_ST7735.h"
 #include "sampling.h"
 #include "buttons.h"
@@ -49,9 +51,9 @@ int main(void)
     LCD_Init();
     cpu_clock_init();
     ButtonInit();
-    ADC_Init();
     DMA_Init();
-    signal_init();
+    PWM_Init();
+    FreqTimer();
 
     count_unloaded = cpu_load_count();  // measure CPU
 
@@ -113,6 +115,10 @@ void displayTask_func(UArg arg1, UArg arg2) {
             GrStringDraw(&sContext, str, -1, 110, 0, false);
             snprintf(str, sizeof(str), "CPU load = %.1f%%", cpu_load*100);  // CPU load
             GrStringDraw(&sContext, str, -1, 0, 120, false);
+            snprintf(str, sizeof(str), "f = %.0f Hz", avgFrequency);  // frequency
+            GrStringDraw(&sContext, str, -1, 0, 110, false);
+            snprintf(str, sizeof(str), "T = %d", pwmPeriod);  // period
+            GrStringDraw(&sContext, str, -1, 0, 100, false);
         }
         GrFlush(&sContext); // flush the frame buffer to the LCD
 

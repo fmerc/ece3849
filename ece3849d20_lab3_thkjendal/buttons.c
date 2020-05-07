@@ -14,10 +14,12 @@
 #include <ti/sysbios/BIOS.h>
 
 #include <stdbool.h>
+#include <math.h>
 #include "inc/hw_memmap.h"
 #include "driverlib/sysctl.h"
 #include "driverlib/gpio.h"
 #include "driverlib/adc.h"
+#include "driverlib/pwm.h"
 #include "sysctl_pll.h"
 
 #include "buttons.h"
@@ -30,7 +32,6 @@ uint32_t gJoystick[2] = {0};    // joystick coordinates
 uint32_t gADCSamplingRate;      // [Hz] actual ADC sampling rate
 
 // imported globals
-extern uint32_t gSystemClock;   // [Hz] system clock frequency
 extern volatile uint32_t gTime; // time in hundredths of a second
 extern volatile bool spectrumMode;
 
@@ -158,7 +159,7 @@ void buttonTask_func(UArg arg1, UArg arg2) {
 
         // read hardware button state
         uint32_t gpio_buttons =
-                (~GPIOPinRead(GPIO_PORTJ_BASE, 0xff) & (GPIO_PIN_1 | GPIO_PIN_0)) | // EK-TM4C1294XL buttons in positions 0 and 1
+                (~GPIOPinRead(GPIO_PORTJ_BASE, 0xff) & (GPIO_PIN_1 | GPIO_PIN_0)) | // USR1 & 2
                 ((~GPIOPinRead(GPIO_PORTH_BASE, 0xff) & GPIO_PIN_1) << 1) |         // S1
                 ((~GPIOPinRead(GPIO_PORTK_BASE, 0xff) & GPIO_PIN_6) >> 3) |         // S2
                 (~GPIOPinRead(GPIO_PORTD_BASE, 0xff) & GPIO_PIN_4);                 // SEL
@@ -171,22 +172,27 @@ void buttonTask_func(UArg arg1, UArg arg2) {
         char button;
 
         if (presses & 1) {  // usr1
-            button = 'S';   // spectrum mode
+            button = 'S';   // decrement pwm period
             Mailbox_post(mailbox0, &button, BIOS_WAIT_FOREVER);
         }
 
         if (presses & 2) {  // usr2
-            button = 'T';   // trigger change
+            button = 'T';   // increment pwm period
             Mailbox_post(mailbox0, &button, BIOS_WAIT_FOREVER);
         }
 
-        if (presses & 4) {  // booster1
+        if (presses & 4) {  // booster 1
             button = 'V';   // increment voltage
             Mailbox_post(mailbox0, &button, BIOS_WAIT_FOREVER);
         }
 
-        if (presses & 8) {  // booster2
+        if (presses & 8) {  // booster 2
             button = 'v';   // decrement voltage
+            Mailbox_post(mailbox0, &button, BIOS_WAIT_FOREVER);
+        }
+
+        if (presses & 16) { // booster select
+            button = 'A';   // play audio
             Mailbox_post(mailbox0, &button, BIOS_WAIT_FOREVER);
         }
     }
@@ -202,10 +208,10 @@ void userInputTask_func(UArg arg1, UArg arg2) {
             for (i = 0; i < 10; i++) {
 
                 if (buttons[i]==('S') && gButtons == 1)
-                    spectrumMode = !spectrumMode;   // change to spectrum mode
+                    pwmPeriod--;   // decrement pwm period
 
                 else if (buttons[i]==('T') && gButtons == 2)
-                    trigState = !trigState;         // change trigger
+                    pwmPeriod++;         // increment pwm period
 
                 else if (buttons[i]==('V') && gButtons == 4)
                     vState = (++vState) % 5;        // increment voltage
@@ -213,8 +219,13 @@ void userInputTask_func(UArg arg1, UArg arg2) {
                 else if (buttons[i]==('v') && gButtons == 8)
                     vState = (vState <= 0) ? 4 : vState - 1;    // decrement voltage
 
+                else if (buttons[i]==('A') && gButtons == 16)
+                    PWMIntEnable(PWM0_BASE, PWM_INT_GEN_2); // enable these interrupts and play audio
             }
         }
+        PWMGenPeriodSet(PWM0_BASE, PWM_GEN_1, pwmPeriod);
+        PWMPulseWidthSet(PWM0_BASE, PWM_OUT_2, roundf((float)pwmPeriod*0.4f));
+        PWMPulseWidthSet(PWM0_BASE, PWM_OUT_3, roundf((float)pwmPeriod*0.4f));
 
         Semaphore_post(semDisplay);
     }
